@@ -211,7 +211,7 @@ export default function BotSettingsPage() {
                         ...prev,
                         ...data,
                         removeBgApiKey: data.removeBgApiKey || "",
-                        prefix: data.prefix || "#",
+                        prefix: data.prefix ?? "#",
                         welcomeMessage: data.welcomeMessage || "",
                         botAllowedJids: data.botAllowedJids || [],
                         botBlockedJids: data.botBlockedJids || [],
@@ -261,23 +261,37 @@ export default function BotSettingsPage() {
     const handleSaveBot = async () => {
         if (!sessionId) return;
 
-        // Conflict detection (warn only, don't block)
+        // Conflict detection — scoped validation
         const warnings: string[] = [];
-        const allNames = collectCommandNames(botConfig.customCommands);
-        const seen = new Map<string, number>();
-        for (const name of allNames) {
-            const key = name.includes(" → ") ? name.split(" → ").pop()! : name;
-            seen.set(key, (seen.get(key) || 0) + 1);
-        }
-        for (const [name, count] of seen) {
-            if (count > 1) warnings.push(`"${name}" appears ${count} times`);
-            if (BUILTIN_COMMANDS.includes(name.toLowerCase())) warnings.push(`"${name}" conflicts with built-in command`);
-        }
-        // Check conflicts with universal commands
         const uniNames = (botConfig.universalCommands || []).map((uc: any) => uc.command?.toLowerCase()).filter(Boolean);
-        for (const [name] of seen) {
-            if (uniNames.includes(name.toLowerCase())) warnings.push(`"${name}" conflicts with universal command`);
+
+        // Validate top-level commands: no dups among themselves, no conflicts with built-in or universal commands
+        const topLevelNames = botConfig.customCommands.filter(c => c.command).map(c => c.command.toLowerCase());
+        const topSeen = new Set<string>();
+        for (const name of topLevelNames) {
+            if (topSeen.has(name)) warnings.push(`Top-level command "${name}" is duplicated`);
+            topSeen.add(name);
+            if (BUILTIN_COMMANDS.includes(name)) warnings.push(`"${name}" conflicts with built-in command`);
+            if (uniNames.includes(name)) warnings.push(`"${name}" conflicts with universal command`);
         }
+
+        // Validate sub-commands at each level: siblings must not conflict with each other or universal commands
+        const validateSubCommands = (cmds: CustomCommand[], parentLabel: string) => {
+            const siblingNames = cmds.filter(c => c.command).map(c => c.command.toLowerCase());
+            const sibSeen = new Set<string>();
+            for (const name of siblingNames) {
+                if (sibSeen.has(name)) warnings.push(`Sub-command "${name}" under "${parentLabel}" is duplicated`);
+                sibSeen.add(name);
+                if (uniNames.includes(name)) warnings.push(`Sub-command "${name}" under "${parentLabel}" conflicts with universal command`);
+            }
+            for (const sc of cmds) {
+                if (sc.subCommands?.length) validateSubCommands(sc.subCommands, `${parentLabel} → ${sc.command}`);
+            }
+        };
+        for (const cc of botConfig.customCommands) {
+            if (cc.subCommands?.length) validateSubCommands(cc.subCommands, cc.command);
+        }
+
         if (warnings.length > 0) {
             toast.error(`Cannot save — command conflicts found:\n${warnings.join("\n")}`);
             return;
@@ -1064,7 +1078,7 @@ export default function BotSettingsPage() {
                             {/* Universal Navigation Commands */}
                             <div className="grid gap-3 border-t border-border/50 pt-4">
                                 <Label className="font-semibold flex items-center gap-1.5">🌐 Universal Navigation Commands</Label>
-                                <p className="text-[10px] text-muted-foreground -mt-2">These commands work globally in any menu context. Actions: <code className="bg-muted px-1 rounded">BACK</code> (up one level), <code className="bg-muted px-1 rounded">MAIN_MENU</code> (root menu), <code className="bg-muted px-1 rounded">END_CHAT</code> (end live chat).</p>
+                                <p className="text-[10px] text-muted-foreground -mt-2">These commands work globally in any menu context. Actions: <code className="bg-muted px-1 rounded">BACK</code> (up one level), <code className="bg-muted px-1 rounded">MAIN_MENU</code> (root menu), <code className="bg-muted px-1 rounded">END_CHAT</code> (end live chat), <code className="bg-muted px-1 rounded">LIVE_CHAT</code> (pause bot, human takes over).</p>
                                 {botConfig.universalCommands.map((uc, uIdx) => (
                                     <div key={uIdx} className="grid grid-cols-[1fr_1fr_2fr_auto] gap-2 items-start">
                                         <Input placeholder="command" className="text-xs h-8" value={uc.command}
@@ -1082,6 +1096,7 @@ export default function BotSettingsPage() {
                                             <option value="BACK">BACK</option>
                                             <option value="MAIN_MENU">MAIN_MENU</option>
                                             <option value="END_CHAT">END_CHAT</option>
+                                            <option value="LIVE_CHAT">LIVE_CHAT</option>
                                         </select>
                                         <Input placeholder="description" className="text-xs h-8" value={uc.description}
                                             onChange={(e) => {

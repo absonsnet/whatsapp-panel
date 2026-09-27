@@ -229,26 +229,54 @@ export async function handleBotCommand(
 
     if (!config.enabled) return;
 
-    const prefix = (config as any).prefix || "#";
-    const isPrefixed = text.startsWith(prefix);
+    const prefix = (config as any).prefix ?? "#";
+    const isPrefixed = prefix.length > 0 ? text.startsWith(prefix) : false;
     const chatKey = makeChatKey(sessionId, remoteJid);
     const chatState = getChatState(chatKey);
 
-    // Livechat mode: skip everything unless prefixed (owner can still use commands)
-    if (chatState?.state === "livechat" && !isPrefixed) return;
+    // Livechat mode: block ALL bot responses except the endchat command
+    if (chatState?.state === "livechat") {
+        if (isPrefixed) {
+            const [lcCommand] = text.trim().split(" ");
+            const lcCmd = lcCommand.toLowerCase().slice(prefix.length);
+            if (lcCmd === "endchat") {
+                clearChatState(chatKey);
+                await sock.sendMessage(remoteJid, { text: "✅ Live chat ended. Bot is active again." }, { quoted: msg });
+            }
+            // Also check universal commands for END_CHAT action
+            const universalCmds = Array.isArray((config as any).universalCommands) ? (config as any).universalCommands : [];
+            const uniMatch = universalCmds.find((uc: any) => uc.command && uc.command.toLowerCase() === text.trim().toLowerCase() && (uc.action || "").toUpperCase() === "END_CHAT");
+            if (uniMatch) {
+                clearChatState(chatKey);
+                await sock.sendMessage(remoteJid, { text: "✅ Live chat ended. Bot is active again." }, { quoted: msg });
+            }
+        } else {
+            // Check bare universal END_CHAT commands
+            const universalCmds = Array.isArray((config as any).universalCommands) ? (config as any).universalCommands : [];
+            const uniMatch = universalCmds.find((uc: any) => uc.command && uc.command.toLowerCase() === text.trim().toLowerCase() && (uc.action || "").toUpperCase() === "END_CHAT");
+            if (uniMatch) {
+                clearChatState(chatKey);
+                await sock.sendMessage(remoteJid, { text: "✅ Live chat ended. Bot is active again." }, { quoted: msg });
+            }
+        }
+        return;
+    }
 
-    // Handle bare menu/submenu replies (no prefix, context-aware)
-    // Only allow bare replies when prefix is empty — if prefix is set, user must always use it
-    if (!isPrefixed && prefix === "" && (chatState?.state === "menu" || chatState?.state === "submenu")) {
+    // Handle bare menu/submenu replies (user replies without prefix while in menu context)
+    // This works whether prefix is set or not — when in menu/submenu state, bare replies are checked
+    const isInMenu = chatState?.state === "menu" || chatState?.state === "submenu";
+    const isBareReply = !isPrefixed; // message doesn't start with prefix (or prefix is empty)
+    // For empty prefix, isPrefixed is always false, so all messages are "bare" — perfect for prefix-less bots
+    if (isBareReply && isInMenu) {
         const customCommands = Array.isArray((config as any).customCommands) ? (config as any).customCommands : [];
         const universalCmds = Array.isArray((config as any).universalCommands) ? (config as any).universalCommands : [
             { command: "0", action: "MAIN_MENU" },
             { command: "back", action: "BACK" },
         ];
         const trimmed = text.trim().toLowerCase();
-        const currentPath = chatState.menuPath || [];
+        const currentPath = chatState!.menuPath || [];
 
-        // Check universal commands first (BACK, MAIN_MENU, END_CHAT)
+        // Check universal commands first (BACK, MAIN_MENU, END_CHAT, LIVE_CHAT)
         const uniMatch = universalCmds.find((uc: any) => uc.command && uc.command.toLowerCase() === trimmed);
         if (uniMatch) {
             const action = (uniMatch.action || "").toUpperCase();
@@ -270,11 +298,17 @@ export async function handleBotCommand(
                 clearChatState(chatKey);
                 await sock.sendMessage(remoteJid, { text: "✅ Live chat ended. Bot is active again." }, { quoted: msg });
                 return;
+            } else if (action === "LIVE_CHAT") {
+                const timeout = (config as any).liveChatTimeout || 30;
+                setChatState(chatKey, "livechat", Date.now() + timeout * 60_000);
+                const lcResponse = uniMatch.description || "🎧 Live chat activated. A human agent will respond shortly.";
+                await sock.sendMessage(remoteJid, { text: lcResponse }, { quoted: msg });
+                return;
             }
             // For MAIN_MENU, fall through
         } else {
             // Resolve commands at current nesting level
-            const currentLevelCmds = chatState.state === "submenu" && currentPath.length > 0
+            const currentLevelCmds = chatState!.state === "submenu" && currentPath.length > 0
                 ? resolveCommandsAtPath(customCommands, currentPath)
                 : customCommands;
             let matched = currentLevelCmds.find((cc: any) => cc.command && cc.command.toLowerCase() === trimmed);
@@ -284,22 +318,17 @@ export async function handleBotCommand(
                 matched = customCommands.find((cc: any) => cc.command && cc.command.toLowerCase() === trimmed && cc.isUniversal);
             }
 
-            // Fallback: check top-level commands
-            if (!matched && chatState.state === "submenu") {
-                matched = customCommands.find((cc: any) => cc.command && cc.command.toLowerCase() === trimmed);
-            }
-
             if (matched) {
                 if (matched.isLiveChat) {
                     const timeout = (config as any).liveChatTimeout || 30;
                     setChatState(chatKey, "livechat", Date.now() + timeout * 60_000);
                 } else if (Array.isArray(matched.subCommands) && matched.subCommands.length > 0) {
-                    const newPath = chatState.state === "submenu"
+                    const newPath = chatState!.state === "submenu"
                         ? [...currentPath, matched.command.toLowerCase()]
                         : [matched.command.toLowerCase()];
                     setChatState(chatKey, "submenu", Date.now() + 30 * 60_000, newPath);
                 } else {
-                    setChatState(chatKey, chatState.state, Date.now() + 30 * 60_000, currentPath.length > 0 ? currentPath : undefined);
+                    setChatState(chatKey, chatState!.state, Date.now() + 30 * 60_000, currentPath.length > 0 ? currentPath : undefined);
                 }
                 const replyText = Array.isArray(matched.subCommands) && matched.subCommands.length > 0
                     ? buildResponseWithSubMenu(matched.response, matched.subCommands, prefix)
@@ -312,7 +341,31 @@ export async function handleBotCommand(
         }
     }
 
-    if (!isPrefixed) return;
+    // For prefix-less bots: when NOT in menu state, still check if text matches a top-level custom command
+    if (prefix === "") {
+        const customCommands = Array.isArray((config as any).customCommands) ? (config as any).customCommands : [];
+        const trimmed = text.trim().toLowerCase();
+        const matched = customCommands.find((cc: any) => cc.command && cc.command.toLowerCase() === trimmed);
+        if (matched) {
+            if (matched.isLiveChat) {
+                const timeout = (config as any).liveChatTimeout || 30;
+                setChatState(chatKey, "livechat", Date.now() + timeout * 60_000);
+            } else if (Array.isArray(matched.subCommands) && matched.subCommands.length > 0) {
+                setChatState(chatKey, "submenu", Date.now() + 30 * 60_000, [matched.command.toLowerCase()]);
+            }
+            const replyText = Array.isArray(matched.subCommands) && matched.subCommands.length > 0
+                ? buildResponseWithSubMenu(matched.response, matched.subCommands, prefix)
+                : matched.response;
+            if (replyText) {
+                await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
+            }
+            return;
+        }
+        // For prefix-less bots, built-in commands are checked via the switch below
+        // but we need isPrefixed to be true for the switch to fire
+    }
+
+    if (!isPrefixed && prefix !== "") return;
 
     // Verify Access Permissions
     const botMode = (config as any).botMode || 'OWNER'; // Default to OWNER if missing
@@ -361,7 +414,7 @@ export async function handleBotCommand(
     if (!canExecute) return;
 
     const [command, ...args] = text.trim().split(" ");
-    const cmd = command.toLowerCase().slice(prefix.length); // remove prefix
+    const cmd = prefix.length > 0 ? command.toLowerCase().slice(prefix.length) : command.toLowerCase(); // remove prefix
 
     try {
         switch (cmd) {

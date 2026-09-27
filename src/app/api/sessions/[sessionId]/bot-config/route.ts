@@ -164,7 +164,7 @@ export async function POST(
                 enablePing: body.enablePing ?? true,
                 enableUptime: body.enableUptime ?? true,
                 removeBgApiKey: body.removeBgApiKey || null,
-                prefix: body.prefix || "#",
+                prefix: body.prefix ?? "#",
                 antiSpamEnabled: body.antiSpamEnabled ?? false,
                 spamLimit: body.spamLimit || 5,
                 spamInterval: body.spamInterval || 10,

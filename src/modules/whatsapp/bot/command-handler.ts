@@ -784,12 +784,7 @@ export async function handleBotCommand(
             }
 
             case "endchat": {
-                if (chatState?.state === "livechat") {
-                    clearChatState(chatKey);
-                    await sock.sendMessage(remoteJid, { text: "✅ Live chat ended. Bot is active again." }, { quoted: msg });
-                } else {
-                    await sock.sendMessage(remoteJid, { text: "ℹ️ No active live chat session." }, { quoted: msg });
-                }
+                await sock.sendMessage(remoteJid, { text: "ℹ️ No active live chat session." }, { quoted: msg });
                 break;
             }
 
